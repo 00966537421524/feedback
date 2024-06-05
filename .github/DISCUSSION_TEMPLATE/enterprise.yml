@@ -1,0 +1,8 @@
+labels: [Enterprise]
+body:
+- type: textarea
+  attributes:
+    label: Body
+    description: Start your discussion!
+  validations:
+    required: true
