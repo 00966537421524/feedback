@@ -1,0 +1,80 @@
+name: Label Templated Discussions
+
+on:
+  discussion:
+    types: [created, category_changed]
+
+jobs:
+  validate-source:
+    name: Validate Discussion Source
+    # Only validate source on newly created discussions; category changes are always allowed.
+    if: github.event.action == 'created'
+    runs-on: ubuntu-latest
+    permissions:
+      discussions: write
+      contents: read
+    outputs:
+      should_proceed: ${{ steps.source-check.outputs.should_proceed }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check if GitHub employee
+        id: check_employee
+        env:
+          ORG_MEMBERS_TOKEN: ${{ secrets.READ_GITHUB_ORG_MEMBERS_TOKEN }}
+          USERNAME: ${{ github.event.discussion.user.login }}
+        run: python .github/workflows/scripts/check_employee.py
+
+      - name: Validate discussion source
+        id: source-check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          DISCUSSION_NODE_ID: ${{ github.event.discussion.node_id }}
+          AUTHOR_LOGIN: ${{ github.event.discussion.user.login }}
+          IS_EMPLOYEE: ${{ steps.check_employee.outputs.is_employee }}
+          DISCUSSION_LABELS: ${{ toJSON(github.event.discussion.labels.*.name) }}
+        run: python .github/workflows/scripts/source_check.py
+
+  label-reason-for-posting:
+    needs: validate-source
+    if: needs.validate-source.outputs.should_proceed == 'true'
+    uses: ./.github/workflows/reason-for-posting-labeler.yml
+    permissions:
+      discussions: write
+      contents: read
+    with:
+      discussion_body: ${{ github.event.discussion.body }}
+      discussion_node_id: ${{ github.event.discussion.node_id }}
+      owner: ${{ github.repository_owner }}
+      repo: ${{ github.event.repository.name }}
+    secrets: inherit
+
+  label-feature-topic-area:
+    needs: validate-source
+    # Run when: (a) this is a category_changed event (validate-source was skipped), or
+    #           (b) this is a created event that passed source validation.
+    if: >
+      !failure() && !cancelled() &&
+      (needs.validate-source.result == 'skipped' || needs.validate-source.outputs.should_proceed == 'true') &&
+      github.event.discussion.category.name != 'Announcements' &&
+      github.event.discussion.category.name != 'Discovery' &&
+      github.event.discussion.category.name != 'A Welcome to GitHub'
+    uses: ./.github/workflows/feature-topic-area-labeler.yml
+    permissions:
+      discussions: write
+      contents: read
+    with:
+      discussion_body: ${{ github.event.discussion.body }}
+      discussion_node_id: ${{ github.event.discussion.node_id }}
+      owner: ${{ github.repository_owner }}
+      repo: ${{ github.event.repository.name }}
+    secrets: inherit

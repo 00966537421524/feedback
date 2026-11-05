@@ -1,0 +1,80 @@
+name: 'On Create: Remove Governed Label'
+
+# Trigger workflow whenever a discussion is created
+on:
+  discussion:
+    types: [created]
+
+jobs:
+  check_labels:
+    name: Check labels
+    runs-on: ubuntu-latest
+
+# Step 1 is to check if the discussion creator is an employee. If employee = 'true', later steps will not fire. If employee = 'false', later steps will continue 
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check if employee
+        id: check_employee
+        env:
+          ORG_MEMBERS_TOKEN: ${{ secrets.READ_GITHUB_ORG_MEMBERS_TOKEN }}
+          USERNAME: ${{ github.event.sender.login }}
+        run: python .github/workflows/scripts/check_employee.py
+
+# Step 2 grabs the label id of the label we want to remove and stores it in the GITHUB_ENV. We use the 'TOPIC' to define the label in plain text
+      - name: Fetch label id
+        id: fetch_label_id
+        if: ${{ steps.check_employee.outputs.is_employee == 'false' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          TOPIC: 'more information needed'
+        run: |
+          gh api graphql -F owner=$OWNER -F name=$REPO -F topic="$TOPIC"  -f query='
+            query($owner: String!, $name: String!, $topic: String) {
+              repository(owner: $owner, name: $name){
+                labels(first: 3, query: $topic) {
+                  edges {
+                    node {
+                      id
+                      name
+                    }
+                  }
+                }
+              }
+            }' > repository_label_data.json
+            
+          echo 'LABEL_ID='$(jq '.data.repository.labels.edges[].node | .id ' repository_label_data.json) >> $GITHUB_ENV
+
+# Step 3 recalls the appropriate discussion id and label id from the GITHUB_ENV and removes the label from the discussion
+      - name: Unlabel the discussion
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          DISCUSSION_ID: ${{ github.event.discussion.node_id }}
+          LABEL_IDS: ${{ env.LABEL_ID }}
+        run: |
+          IFS=' ' read -ra labelIds <<< "$LABEL_IDS"
+          for labelId in "${labelIds[@]}"; do
+            gh api graphql -f query='
+              mutation($labelableId: ID!, $labelIds: [ID!]!) {
+                removeLabelsFromLabelable(input: {labelableId: $labelableId, labelIds: $labelIds}) {
+                  labelable {
+                    labels(first: 10) {
+                      edges {
+                        node {
+                          id
+                          name
+                        }
+                      }
+                    }
+                  }
+                }
+              }' -f labelableId=$DISCUSSION_ID -f labelIds=$labelId
+          done

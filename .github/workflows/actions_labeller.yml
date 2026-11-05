@@ -1,0 +1,176 @@
+name: Auto-Label Discussions for Actions Category
+
+on:
+  discussion:
+    types: [created, category_changed]
+
+jobs:
+  auto-label-keywords:
+    if: ${{ contains(github.event.discussion.category.name, 'Actions') }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Extract Title and Body Text
+        id: extract_text
+        uses: actions/github-script@v6
+        env:
+          DISCUSSION_BODY: ${{ github.event.discussion.body }}
+          DISCUSSION_TITLE: ${{ github.event.discussion.title }}
+        with:
+          result-encoding: string
+          script: |
+            const rawBody = process.env.DISCUSSION_BODY || '';
+            // Extract text under the "### Discussion Details" heading (may be multi-line).
+            // GitHub Discussion forms render each field as:
+            //   ### Field Label
+            //   <blank line>
+            //   User-supplied answer
+            // So we capture everything from "### Discussion Details" up to the next "###" or end.
+            const match = rawBody.match(/^### Discussion Details\s*\n([\s\S]*?)(?=\n###|$)/m);
+            const body = match ? match[1].trim() : '';
+            const title = process.env.DISCUSSION_TITLE || '';
+            core.info(`Extracted title: ${title}`);
+            core.info(`Extracted body: ${body}`);
+            return JSON.stringify({ title, body });
+
+      - name: Auto-label by keyword search
+        id: auto_label_keywords
+        uses: actions/github-script@v6
+        env:
+          EXTRACT_TEXT_RESULT: ${{ steps.extract_text.outputs.result }}
+        with:
+          result-encoding: string
+          script: |
+            const labelMap = [
+              {
+                label: 'Workflow Deployment',
+                keywords: [
+                  "deployment error",
+                  "publish artifact",
+                  "release failure",
+                  "deployment target",
+                  "github pages",
+                  "deployment issue",
+                  "release workflow",
+                  "target environment"
+                ]
+              },
+              {
+                label: 'Workflow Configuration',
+                keywords: [
+                  "yaml syntax",
+                  "job dependency",
+                  "setup error",
+                  "workflow file",
+                  "configuration issue",
+                  "matrix strategy",
+                  "define env",
+                  "secret management",
+                  "environment setup",
+                  "config job"
+                ]
+              },
+              {
+                label: 'Schedule & Cron Jobs',
+                keywords: [
+                  "cron job",
+                  "scheduled workflow",
+                  "timing issue",
+                  "delay trigger",
+                  "timezone error",
+                  "periodic run",
+                  "recurring schedule",
+                  "interval workflow",
+                  "scheduled trigger",
+                  "cron expression"
+                ]
+              },
+              {
+                label: 'Metrics & Insights',
+                keywords: [
+                  "usage metrics",
+                  "performance trend",
+                  "analytics graph",
+                  "stats dashboard",
+                  "timeseries graph",
+                  "insight report",
+                  "metric tracking",
+                  "workflow analytics",
+                  "performance metric",
+                  "statistics report"
+                ]
+              }
+            ];
+            let title = '';
+            let body = '';
+            try {
+              const parsed = JSON.parse(process.env.EXTRACT_TEXT_RESULT);
+              title = (parsed.title || '').trim();
+              body  = (parsed.body  || '').trim();
+            } catch (e) {
+              core.error('Failed to parse discussion text: ' + e.message);
+            }
+            const text = (title + ' ' + body).toLowerCase();
+            let foundLabel = '';
+            core.info(`Auto-label debug: text to match: '${text}'`);
+            for (const map of labelMap) {
+              core.info(`Auto-label debug: checking label '${map.label}' with keywords: ${map.keywords.join(', ')}`);
+              for (const k of map.keywords) {
+                if (text.includes(k)) {
+                  core.info(`Auto-label debug: matched keyword '${k}' for label '${map.label}'`);
+                  foundLabel = map.label;
+                  break;
+                }
+              }
+              if (foundLabel !== '') break;
+            }
+            core.info(`Auto-label debug: selected label: '${foundLabel}'`);
+            return foundLabel;
+
+      - name: Fetch label ID for auto-label
+        id: fetch_auto_label_id
+        if: ${{ steps.auto_label_keywords.outputs.result != '' }}
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          TOPIC: ${{ steps.auto_label_keywords.outputs.result }}
+        run: |
+          gh api graphql -F owner=$OWNER -F name=$REPO -F topic="$TOPIC" -f query='
+            query($owner: String!, $name: String!, $topic: String) {
+              repository(owner: $owner, name: $name) {
+                labels(first: 1, query: $topic) {
+                  edges {
+                    node {
+                      id
+                      name
+                    }
+                  }
+                }
+              }
+            }' > auto_label_data.json
+
+          AUTO_LABEL_ID=$(jq -r '.data.repository.labels.edges[0]?.node?.id // empty' auto_label_data.json)
+          echo "AUTO_LABEL_ID=$AUTO_LABEL_ID" >> $GITHUB_ENV
+
+      - name: Apply label to discussion
+        if: ${{ env.AUTO_LABEL_ID != '' }}
+        env:
+          DISCUSSION_NODE_ID: ${{ github.event.discussion.node_id }}
+        run: |
+          gh api graphql -f query='
+            mutation($labelableId: ID!, $labelIds: [ID!]!) {
+              addLabelsToLabelable(input: {labelableId: $labelableId, labelIds: $labelIds}) {
+                labelable {
+                  labels(first: 10) {
+                    edges {
+                      node {
+                        id
+                        name
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ' -f labelableId=$DISCUSSION_NODE_ID -f labelIds[]=$AUTO_LABEL_ID

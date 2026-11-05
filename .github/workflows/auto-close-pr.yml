@@ -1,0 +1,45 @@
+name: Auto Close PRs
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+jobs:
+  check_pr:
+    name: Check PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check if employee
+        id: check_employee
+        env:
+          ORG_MEMBERS_TOKEN: ${{ secrets.READ_GITHUB_ORG_MEMBERS_TOKEN }}
+          USERNAME: ${{ github.event.pull_request.user.login }}
+        run: python .github/workflows/scripts/check_employee.py
+
+      - name: Close PR
+        id: close_pr
+        if: ${{ steps.check_employee.outputs.is_employee == 'false' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const body = `This pull request is being automatically closed because we do not accept external contributions to this repository.`;
+
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+            await github.rest.pulls.update({
+              ...context.repo,
+              pull_number: context.payload.pull_request.number,
+              state: 'closed'
+            });

@@ -1,0 +1,40 @@
+name: 'On Label: Remove Governed Label'
+
+# Trigger workflow whenever a discussion is labeled
+on:
+  discussion:
+    types: [labeled]
+
+permissions:
+  contents: read
+  discussions: write
+
+jobs:
+  action:
+    runs-on: ubuntu-latest
+# Step 1 is to check if the user applying the label is an employee. If employee = 'true', later steps will not fire. If employee = 'false', later steps will continue     
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check if employee
+        id: check_employee
+        env:
+          ORG_MEMBERS_TOKEN: ${{ secrets.READ_GITHUB_ORG_MEMBERS_TOKEN }}
+          USERNAME: ${{ github.event.sender.login }}
+        run: python .github/workflows/scripts/check_employee.py
+
+# Step 2 references the label-actions.yml file for instructions. That config file tells the action what to do next.
+# config file will reference the GITHUB_ENV and will only process the 'unlabel' action on 'discussions' and will unlabel the named labels
+      - name: Label Actions
+        if: ${{ steps.check_employee.outputs.is_employee == 'false' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          config-path: '.github/label-actions.yml'
+          process-only: 'discussions'
+        uses: dessant/label-actions@v3
